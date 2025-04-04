@@ -1,4 +1,4 @@
-module github.com/RidiculousCircumstances/netherway
+module github.com/RidiculousCircumstances/netherway/v2
 
 go 1.23.3
 

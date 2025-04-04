@@ -2,26 +2,26 @@ package netherway
 
 import (
 	"crypto/tls"
-	"github.com/rabbitmq/amqp091-go"
 	"net"
 	"time"
+
+	"github.com/rabbitmq/amqp091-go"
 )
 
 // ConnConfig представляет настройки для соединения с AMQP
 type ConnConfig struct {
-	SASL                      []amqp091.Authentication
-	Vhost                     string
-	ChannelMax                uint16
-	FrameSize                 int
-	Heartbeat                 time.Duration
-	TLSClientConfig           *tls.Config
-	Properties                amqp091.Table
-	Locale                    string
-	Dial                      func(network, addr string) (net.Conn, error)
-	AmqpURI                   string
-	PublisherChannelPoolSize  int
-	SubscriberChannelPoolSize int
-	Exchanges                 []Exchange
+	SASL                     []amqp091.Authentication
+	Vhost                    string
+	ChannelMax               uint16
+	FrameSize                int
+	Heartbeat                time.Duration
+	TLSClientConfig          *tls.Config
+	Properties               amqp091.Table
+	Locale                   string
+	Dial                     func(network, addr string) (net.Conn, error)
+	AmqpURI                  string
+	PublisherChannelPoolSize int
+	Exchanges                []Exchange
 }
 
 // connFactory представляет фабрику для создания соединений с RabbitMQ
@@ -55,7 +55,7 @@ func (cf *connFactory) GetConnection() (Connection, error) {
 	}
 
 	// Создаем объект amqpConnection
-	amqpConn, err := NewAMQPConnection(conn, cf.config.PublisherChannelPoolSize, cf.config.SubscriberChannelPoolSize, cf.config.Exchanges)
+	amqpConn, err := NewAMQPConnection(conn, cf.config.PublisherChannelPoolSize, cf.config.Exchanges)
 
 	if err != nil {
 		return nil, err

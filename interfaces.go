@@ -14,8 +14,8 @@ type Connection interface {
 type MessageBroker interface {
 	Publish(ctx context.Context, exchangeName, topic string, data interface{}) error
 	Subscribe(ctx context.Context, exchangeName, topic string, handler MessageHandler) error
-	Pause(consumerKey ...string)
-	Resume(ctx context.Context, consumerKey ...string) error
+	Pause(consumerKeys []string)
+	Resume(ctx context.Context, consumerKeys []string) error
 	Close() error
 }
 
@@ -26,9 +26,7 @@ type Publisher interface {
 
 type Subscriber interface {
 	Subscribe(ctx context.Context, exchangeName, topic string, handler MessageHandler) error
-	Close() error
 	Cancel()
-	Resume(ctx context.Context) error
 }
 
 type MessageHandler interface {

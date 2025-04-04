@@ -2,12 +2,19 @@ package netherway
 
 import (
 	"context"
-	"go.uber.org/zap"
 	"sync"
+
+	"go.uber.org/zap"
 )
 
 type PubFactory func(conn Connection) Publisher
 type SubFactory func(conn Connection) Subscriber
+
+type subscriptionConfig struct {
+	exchange string
+	topic    string
+	handler  MessageHandler
+}
 
 type messageBroker struct {
 	publisherFactory  PubFactory
@@ -15,8 +22,8 @@ type messageBroker struct {
 	conn              Connection
 	publisher         Publisher
 
-	// Храним подписчиков в мапе (ключ: exchange:topic)
-	subscribers   map[string]Subscriber
+	subscribers   map[string]Subscriber         // Активные подписчики
+	subConfigs    map[string]subscriptionConfig // Настройки подписок
 	subscriberMux sync.Mutex
 	publisherMux  sync.Mutex
 
@@ -41,6 +48,7 @@ func NewMessageBroker(cfg Config) MessageBroker {
 		logger:            cfg.Logger,
 		conn:              conn,
 		subscribers:       make(map[string]Subscriber),
+		subConfigs:        make(map[string]subscriptionConfig),
 	}
 }
 
@@ -50,7 +58,7 @@ func (mb *messageBroker) lazyInitPublisher() error {
 	defer mb.publisherMux.Unlock()
 
 	if mb.publisher != nil {
-		return nil // Уже инициализирован
+		return nil
 	}
 
 	mb.publisher = mb.publisherFactory(mb.conn)
@@ -62,13 +70,13 @@ func (mb *messageBroker) Publish(ctx context.Context, exchangeName, topic string
 	if err := mb.lazyInitPublisher(); err != nil {
 		return err
 	}
-
 	return mb.publisher.Publish(ctx, exchangeName, topic, data)
 }
 
-// Subscribe создаёт подписку и сохраняет её в мапе
+// Subscribe создаёт подписку и сохраняет её в maps subscribers + subConfigs
 func (mb *messageBroker) Subscribe(ctx context.Context, exchangeName, topic string, handler MessageHandler) error {
 	key := exchangeName + ":" + topic
+
 	mb.subscriberMux.Lock()
 	defer mb.subscriberMux.Unlock()
 
@@ -76,84 +84,101 @@ func (mb *messageBroker) Subscribe(ctx context.Context, exchangeName, topic stri
 		mb.logger.Warn("Subscription already exists", zap.String("subscriber", key))
 		return nil
 	}
+
+	// Сохраняем конфиг подписки
+	mb.subConfigs[key] = subscriptionConfig{
+		exchange: exchangeName,
+		topic:    topic,
+		handler:  handler,
+	}
+
 	sub := mb.subscriberFactory(mb.conn)
 	if err := sub.Subscribe(ctx, exchangeName, topic, handler); err != nil {
 		return err
 	}
 	mb.subscribers[key] = sub
-	mb.logger.Info("Subscription added", zap.String("subscriber: ", key))
+	mb.logger.Info("Subscription added", zap.String("subscriber", key))
+
 	return nil
 }
 
-// Pause приостанавливает подписки.
-// Если не передан ни один ключ, приостанавливаются все подписки.
-// Если передан ключ (consumerKey[0]), приостанавливается только соответствующий подписчик.
-func (mb *messageBroker) Pause(consumerKey ...string) {
+// Pause "отключает" подписки = полностью закрывает их и удаляет из brokers.subscribers
+func (mb *messageBroker) Pause(consumerKeys []string) {
 	mb.subscriberMux.Lock()
 	defer mb.subscriberMux.Unlock()
 
-	if len(consumerKey) == 0 {
-		// Приостанавливаем все подписки
-		for key, sub := range mb.subscribers {
-			mb.logger.Info("Pausing subscription", zap.String("subscriber", key))
-			sub.Cancel()
+	var keysToPause []string
+	if len(consumerKeys) == 0 {
+		for key := range mb.subscribers {
+			keysToPause = append(keysToPause, key)
 		}
 	} else {
-		key := consumerKey[0]
-		if sub, exists := mb.subscribers[key]; exists {
-			mb.logger.Info("Pausing subscription", zap.String("subscriber", key))
-			sub.Cancel()
-		} else {
-			mb.logger.Warn("Subscription not found", zap.String("subscriber", key))
+		keysToPause = consumerKeys
+	}
+
+	for _, key := range keysToPause {
+		sub, exists := mb.subscribers[key]
+		if !exists {
+			mb.logger.Warn("Unknown subscriber to pause", zap.String("subscriber", key))
+			continue
 		}
+		mb.logger.Info("Pausing subscription (close subscriber)", zap.String("subscriber", key))
+		sub.Cancel()
+		delete(mb.subscribers, key)
 	}
 }
 
-// Resume возобновляет подписки.
-// Если не передан ни один ключ, возобновляются все подписки.
-// Если передан ключ (consumerKey[0]), возобновляется только подписка с указанным ключом.
-func (mb *messageBroker) Resume(ctx context.Context, consumerKey ...string) error {
+// Resume восстанавливает подписки, заново создавая их с нуля
+func (mb *messageBroker) Resume(ctx context.Context, consumerKeys []string) error {
 	mb.subscriberMux.Lock()
 	defer mb.subscriberMux.Unlock()
 
-	if len(consumerKey) == 0 {
-		// Возобновляем все подписки
-		for key, sub := range mb.subscribers {
-			mb.logger.Info("Resuming subscription", zap.String("subscriber", key))
-			if err := sub.Resume(ctx); err != nil {
-				mb.logger.Error("Error resuming subscription", zap.String("subscriber", key), zap.Error(err))
-				return err
-			}
+	var keysToResume []string
+	if len(consumerKeys) == 0 {
+		// Возобновляем все, для которых есть конфиг
+		for key := range mb.subConfigs {
+			keysToResume = append(keysToResume, key)
 		}
 	} else {
-		key := consumerKey[0]
-		if sub, exists := mb.subscribers[key]; exists {
-			mb.logger.Info("Resuming subscription", zap.String("subscriber", key))
-			if err := sub.Resume(ctx); err != nil {
-				mb.logger.Error("Error resuming subscription", zap.String("subscriber", key), zap.Error(err))
-				return err
-			}
-		} else {
-			mb.logger.Warn("Subscription not found", zap.String("subscriber", key))
-		}
+		keysToResume = consumerKeys
 	}
+
+	for _, key := range keysToResume {
+		// Если конфиг не сохранён – пропускаем
+		cfg, existsCfg := mb.subConfigs[key]
+		if !existsCfg {
+			mb.logger.Warn("No subscription config found for resume", zap.String("subscriber", key))
+			continue
+		}
+		// Если подписчик уже есть в списке, значит он уже активен
+		if _, existsSub := mb.subscribers[key]; existsSub {
+			mb.logger.Info("Subscriber already active, skip resume", zap.String("subscriber", key))
+			continue
+		}
+
+		mb.logger.Info("Resuming subscription: creating new subscriber", zap.String("subscriber", key))
+		sub := mb.subscriberFactory(mb.conn)
+		if err := sub.Subscribe(ctx, cfg.exchange, cfg.topic, cfg.handler); err != nil {
+			mb.logger.Error("Error resubscribing", zap.String("subscriber", key), zap.Error(err))
+			return err
+		}
+		mb.subscribers[key] = sub
+	}
+
 	return nil
 }
 
 func (mb *messageBroker) Close() error {
 	var pubErr error
-
 	if mb.publisher != nil {
 		pubErr = mb.publisher.Close()
 	}
 
-	// Закрываем всех подписчиков из мапы subscribers
 	mb.subscriberMux.Lock()
 	defer mb.subscriberMux.Unlock()
 	for key, sub := range mb.subscribers {
-		if err := sub.Close(); err != nil {
-			mb.logger.Error("Error closing subscriber", zap.String("subscriber", key), zap.Error(err))
-		}
+		sub.Cancel()
+		delete(mb.subscribers, key)
 	}
 
 	if pubErr != nil {
